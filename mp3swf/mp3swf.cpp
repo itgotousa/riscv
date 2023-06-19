@@ -6,13 +6,22 @@
 #include <tchar.h>
 #include <windows.h>
 #include <shellapi.h>
+#include <io.h>
+#include <wchar.h>
+#include <fcntl.h>
+#include <d2d1.h>
+#include <dwrite.h>
 #include <xaudio2.h>
 
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "dwrite.lib")
 
 #include "libmp3dec.h"
 
 #define PRINT_TAG   1
+#define SWF_TIMER   123
+#define SWF_SECOND  124
 
 #define S8      int8_t
 #define U8      uint8_t
@@ -50,6 +59,7 @@ U8  sign1024[9] = { 0x80, 0x00, 0x02, 0x80, 0x00, 0x00, 0x01, 0xE0, 0x00 };
 #endif
 static U16  tagTab[1024]; /* global variables : tag table */
 static const char* tagName[1024];
+static U8* streamSWF = NULL;
 
 static void InitTagTab()
 {
@@ -283,7 +293,7 @@ public:
     }
     ~SParser() {}
 
-    // Get data from the script
+    bool HasData() { return (nullptr != m_script); }
     const U8* GetBaseAddr() { return m_script; }
     U8* GetCurrentAddr() { return (U8*)(m_script + m_pos); }
     U32 GetPosition() { return m_pos; }
@@ -461,6 +471,11 @@ public:
     U16  wBitsPerSample;
 
     U8  m_format;
+    SRECT m_frame;
+    U16 m_frameRate;
+    U16 m_frameCount;
+    S16 m_frameCurrent;
+    bool m_AtEnd;
 
 public:
     ScriptThread()
@@ -473,6 +488,11 @@ public:
         wBitsPerSample = snd8Bit;
 
         m_format = 0;
+        m_frameRate = 0;
+        m_frameCount = 0;
+        m_frameCurrent = -1;
+        m_AtEnd = false;
+        m_frame = { 0 };
     }
 
     ~ScriptThread()
@@ -515,6 +535,87 @@ public:
         return 0;
     }
 
+    int PushData(U8* data, U32 chunkLen)
+    {
+        if (nullptr == data || chunkLen < 1024 * 1024)
+            return -1;
+
+        U8* p = (U8*)data;
+        U32 bytes = chunkLen;
+
+        if ('F' != *(p + 0) || 'W' != *(p + 1) || 'S' != *(p + 2) || 0x08 != *(p + 3))
+            return -1;
+
+        Attach(data, 8, chunkLen);
+        GetRect(&m_frame);  //Get the frame 
+
+        m_frameRate = Get2Bytes() >> 8;
+        m_frameCount = Get2Bytes();
+
+        return 0;
+    }
+
+    S16 GetFrameCurrent() { return m_frameCurrent; }
+    U16 GetFrameRate() { return m_frameRate; }
+    U16 GetFrameCount() { return m_frameCount; }
+    bool IsAtEnd() { return m_AtEnd;  }
+
+    int SoundStreamBlock()
+    {
+        return 0;
+    }
+
+    int SoundStreamHead2()
+    {
+        return 0;
+    }
+
+    int DoTag()
+    {
+        int res = 0;
+
+        if (m_AtEnd)
+            return 1;
+
+        int code = GetTag();
+        if (code < 0)
+            return 1;
+
+        switch (code)
+        {
+        case ST_SHOWFRAME:
+            m_frameCurrent++;  // move the current frame one step
+            break;
+        case ST_SOUNDSTREAMBLOCK:
+            res = SoundStreamBlock();
+            if (0 != res)
+                return 1;
+            break;
+        case ST_SOUNDSTREAMHEAD2:
+            res = SoundStreamHead2();
+            if (0 != res)
+                return 1;
+            break;
+        case ST_END:
+            m_AtEnd = true; // we reach the end
+            return 1;
+        default:
+            break;
+        }
+        GotoNextTag();
+        return res;
+    }
+
+    int DoFrame(U16 frameIdx)
+    {
+        int res = 0;
+        // this while loop will stop when we meet ST_SHOWFRAME tag 
+        while (m_frameCurrent < frameIdx && 0 == res)
+        {
+            res = DoTag();
+        }
+        return res;
+    }
 };
 
 class VoiceCallback : public IXAudio2VoiceCallback
@@ -713,16 +814,58 @@ private:
 };
 
 
-int DoSoundStreamBlock(U8* tag, U32 bytes, CMp3Decomp* d);
-int DoSoundStreamHead2(U8* tag, U32 bytes);
+int AttachSWF(LPTSTR path);
 
+ScriptThread player;
+ID2D1Factory* gpD2DFactory = nullptr;
+IDWriteFactory* gpWriteFactory = nullptr;
+IDWriteTextFormat* gpTextFormat = nullptr;
+
+ID2D1HwndRenderTarget* gpRenderTarget = nullptr;
+ID2D1SolidColorBrush* gpBrush = nullptr;
 
 TCHAR path[MAX_PATH + 1] = { 0 };
+TCHAR text[MAX_PATH + 1] = { 0 };
 
+#define  DEFAULT_DPI    96
 LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    int r;
+    HRESULT hr = S_OK;
+    UINT uElapse;
+    S16  frameIdx;
+    RECT rcClient;
+
     switch (message) 
     {
+    case WM_TIMER:
+        if (SWF_SECOND == wParam)
+        {
+            if (player.HasData())
+            {
+                frameIdx = player.GetFrameCurrent();
+                U16 frameCount = player.GetFrameCount();
+                U16 frameRate = player.GetFrameRate();
+                swprintf(text, MAX_PATH, TEXT("Curr:%5d | Total:%5d | Rate:%d"), frameIdx, frameCount, frameRate);
+                rcClient.left = 10;
+                rcClient.right = 300;
+                rcClient.top = 50;
+                rcClient.bottom = 100;
+                InvalidateRect(hWnd, &rcClient, 1);
+            }
+        }
+        else if (SWF_TIMER == wParam)
+        {
+            if (player.IsAtEnd())
+            {
+                KillTimer(hWnd, SWF_TIMER);
+                MessageBox(hWnd, TEXT("Read the end of SWF file"), TEXT("Play successfully!"), MB_OK);
+                break;
+            }
+            frameIdx = player.GetFrameCurrent();
+            player.DoFrame(frameIdx + 1);
+        }
+        break;
     case WM_LBUTTONDOWN:
         ::PostMessage(hWnd, WM_NCLBUTTONDOWN, HTCAPTION, lParam);
         break;
@@ -731,17 +874,84 @@ LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
     case WM_ERASEBKGND:
         return 0;
     case WM_PAINT:
-        break;
-    case WM_DROPFILES:
-        if (DragQueryFile((HDROP)wParam, 0, path, MAX_PATH))
+#if 10
+        if (nullptr == gpRenderTarget)
         {
-            MessageBox(NULL, path, TEXT("Drag File"), MB_OK);
+            GetClientRect(hWnd, &rcClient);
+            // Create a D2D hwnd render target
+            D2D1_RENDER_TARGET_PROPERTIES renderTargetProperties
+                = D2D1::RenderTargetProperties();
+            renderTargetProperties.dpiX = DEFAULT_DPI;
+            renderTargetProperties.dpiY = DEFAULT_DPI;
+
+            D2D1_HWND_RENDER_TARGET_PROPERTIES hwndRenderTragetproperties
+                = D2D1::HwndRenderTargetProperties(hWnd,
+                    D2D1::SizeU(rcClient.right, rcClient.bottom));
+            hr = gpD2DFactory->CreateHwndRenderTarget(
+                                renderTargetProperties,
+                                hwndRenderTragetproperties,
+                                &gpRenderTarget);
+            if (S_OK != hr)
+                return 0;
+
+            if (nullptr != gpBrush)
+            {
+                gpBrush->Release();
+                gpBrush = nullptr;
+            }
+            hr = gpRenderTarget->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black, 1.0f), &gpBrush);
+            if (S_OK != hr)
+                return 0;
+
         }
+
+        gpRenderTarget->BeginDraw();
+        gpRenderTarget->Clear(D2D1::ColorF(D2D1::ColorF::White, 1.0f));
+        gpRenderTarget->SetTransform(D2D1::Matrix3x2F::Identity());
+
+        // Draw text
+        D2D1_RECT_F layoutRect = D2D1::RectF(10.0f, 50.0f, 300.0f, 100.0f);
+        gpRenderTarget->DrawText(text, wcslen(text), gpTextFormat, layoutRect, gpBrush);
+
+        hr = gpRenderTarget->EndDraw();
+        if (FAILED(hr) || hr == D2DERR_RECREATE_TARGET)
+        {
+            gpRenderTarget->Release();
+            gpRenderTarget = nullptr;
+            if (nullptr != gpBrush)
+            {
+                gpBrush->Release();
+                gpBrush = nullptr;
+            }
+        }
+#endif
+        break;
+
+    case WM_DROPFILES:
+        if (0 == DragQueryFile((HDROP)wParam, 0, path, MAX_PATH))
+        {
+            MessageBox(hWnd, TEXT("Cannot Accept SWF file"), TEXT("Drag File"), MB_OK);
+            break;
+        }
+        r = AttachSWF(path);
+        if(0 != r)
+        {
+            MessageBox(hWnd, TEXT("Cannot Open SWF file"), TEXT("Drag File"), MB_OK);
+            break;
+        }
+        if (0 == player.m_frameRate)
+            break;
+
+        uElapse = 1000 / player.m_frameRate;
+        SetTimer(hWnd, SWF_TIMER, uElapse, NULL);
+
         break;
     case WM_CREATE:
+        swprintf(text, MAX_PATH, TEXT("Drag SWF file here!"));
         DragAcceptFiles(hWnd, TRUE);
         break;
     case WM_CLOSE:
+        KillTimer(hWnd, SWF_TIMER);
         PostQuitMessage(0);
         break;
     }
@@ -751,10 +961,57 @@ LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
 int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpstrCmdLine, int nCmdShow)
 {
     ///////////////////////////////////////////////////////////
+    // Initialize COM
+    ///////////////////////////////////////////////////////////
+    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (S_OK != hr)
+    {
+        MessageBox(NULL, TEXT("Failed to create COM!"), TEXT("FAILURE"), MB_OK);
+        return 1;
+    }
+
+    gpD2DFactory = nullptr;
+    hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &(gpD2DFactory));
+    if (S_OK != hr)
+    {
+        MessageBox(NULL, TEXT("Failed to create D2D!"), TEXT("FAILURE"), MB_OK);
+        ::CoUninitialize();
+        return 1;
+    }
+    gpWriteFactory = nullptr;
+    // Create DWrite factory
+    hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(&gpWriteFactory));
+    if (S_OK != hr)
+    {
+        MessageBox(NULL, TEXT("Failed to create DWrite!"), TEXT("FAILURE"), MB_OK);
+        ::CoUninitialize();
+        return 1;
+    }
+
+    gpTextFormat = nullptr;
+    hr = gpWriteFactory->CreateTextFormat(
+        L"Courier New",
+        NULL,
+        DWRITE_FONT_WEIGHT_NORMAL,
+        DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL,
+        13.0f,
+        L"en-us",
+        &gpTextFormat
+    );
+    if (S_OK != hr)
+    {
+        MessageBox(NULL, TEXT("Failed to create TextFormat!"), TEXT("FAILURE"), MB_OK);
+        ::CoUninitialize();
+        return 1;
+    }
+
+    ///////////////////////////////////////////////////////////
     // Set up window
     ///////////////////////////////////////////////////////////
-
     const TCHAR WIN_CLASS_NAME[] = TEXT("XAUDIO2_SWF_WINDOW_CLASS");
+
+    streamSWF = nullptr;
 
     WNDCLASSEXW  wcex = { 0 };
 
@@ -776,6 +1033,7 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpstrC
     if (0 == r)
     {
         MessageBox(NULL, TEXT("Failed to register window class!"), TEXT("FAILURE"), MB_OK);
+        ::CoUninitialize();
         return 1;
     }
 
@@ -783,9 +1041,9 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpstrC
         WIN_CLASS_NAME,
         TEXT("SWF MP3 demo"),
         WS_OVERLAPPEDWINDOW,
-        100,
-        100,
         400,
+        400,
+        600,
         400,
         NULL,
         NULL,
@@ -796,22 +1054,14 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpstrC
     if (!window) 
     {
         MessageBox(NULL, TEXT("Failed to create window!"), TEXT("FAILURE"), MB_OK);
-        return 1;
-    }
-
-    ///////////////////////////////////////////////////////////
-    // Initialize COM
-    ///////////////////////////////////////////////////////////
-    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    if (S_OK != hr) 
-    {
-        MessageBox(NULL, TEXT("Failed to create COM!"), TEXT("FAILURE"), MB_OK);
+        ::CoUninitialize();
         return 1;
     }
 
     ///////////////////////////////////////////////////////////
     // Show window and start message loop.
     ///////////////////////////////////////////////////////////
+    SetTimer(window, SWF_SECOND, 1000, NULL);
     ShowWindow(window, SW_SHOW);
 
     MSG message;
@@ -821,18 +1071,61 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpstrC
         DispatchMessage(&message);
     }
 
+    KillTimer(window, SWF_SECOND);
     ::CoUninitialize();
     return (int)message.wParam;
 }
 
-int DoSoundStreamHead2(U8* tag, U32 bytes)
+int AttachSWF(LPTSTR path)
 {
-    return 0;
-}
+    //MessageBox(NULL, path, TEXT("Drag File"), MB_OK);
 
-int DoSoundStreamBlock(U8* tag, U32 bytes, CMp3Decomp* d)
-{
-    //d->Setup(tag, bytes);
-    //d->Decompress(nullptr, 1152);
+    int fd = 0;
+    if (0 != _tsopen_s(&fd, path, _O_RDONLY | _O_BINARY, _SH_DENYWR, 0))
+    {
+        MessageBox(NULL, TEXT("Cannot Open SWF file"), TEXT("Drag File"), MB_OK);
+        return 0;
+    }
+
+    uint32_t size = (uint32_t)_lseek(fd, 0, SEEK_END); /* get the file size */
+    if (size > 256*1024*1024)
+    {
+        MessageBox(NULL, TEXT("SWF file is tooooo big!"), TEXT("Drag File"), MB_OK);
+        return 0;
+    }
+
+    _lseek(fd, 0, SEEK_SET); /* go to the begin of the file */
+
+    U8* stream = (uint8_t*)malloc(size);
+    if (NULL == stream)
+    {
+        MessageBox(NULL, TEXT("streamSWF malloc failed!"), TEXT("Drag File"), MB_OK);
+        return 0;
+    }
+
+    uint32_t bytes = (uint32_t)_read(fd, stream, size);
+    if (size != bytes)
+    {
+        MessageBox(NULL, TEXT("Read file failed!"), TEXT("Drag File"), MB_OK);
+        free(stream);
+        stream = nullptr;
+        return 0;
+    }
+
+    _close(fd);
+
+    if (0 != player.PushData(stream, bytes))
+    {
+        MessageBox(NULL, TEXT("Attach Data failed!"), TEXT("Drag File"), MB_OK);
+        free(stream);
+        stream = nullptr;
+        return 0;
+    }
+
+    if (nullptr != streamSWF)
+        free(streamSWF);
+
+    streamSWF = stream;
+
     return 0;
 }
