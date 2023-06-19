@@ -2,8 +2,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <memory.h>
-//#include <mmreg.h>
+#define WIN32_LEAN_AND_MEAN
+#include <tchar.h>
 #include <windows.h>
+#include <shellapi.h>
 #include <xaudio2.h>
 
 #pragma comment(lib, "ole32.lib")
@@ -588,13 +590,7 @@ public:
         m_xaudioSourceVoice = nullptr;
         m_xaudioBuffer = { 0 };
 
-        HRESULT hr = ::CoInitializeEx(NULL, COINIT_MULTITHREADED);
-        if (S_OK != hr)
-        {
-            return -1;
-        }
-
-        hr = XAudio2Create(&m_xaudio, 0, XAUDIO2_DEFAULT_PROCESSOR);
+        HRESULT hr = XAudio2Create(&m_xaudio, 0, XAUDIO2_DEFAULT_PROCESSOR);
         if (S_OK != hr)
         {
             return -1;
@@ -612,7 +608,6 @@ public:
 
     int NativeDestruct()
     {
-        ::CoUninitialize();
         return 0;
     }
 
@@ -721,190 +716,113 @@ private:
 int DoSoundStreamBlock(U8* tag, U32 bytes, CMp3Decomp* d);
 int DoSoundStreamHead2(U8* tag, U32 bytes);
 
-int main(int argc, char* argv[])
+
+TCHAR path[MAX_PATH + 1] = { 0 };
+
+LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
-    SRECT rect = { 0 };
-    bool print_tag = false;
-    ScriptThread sp;
-    NativeSoundMix soundMix;
-
-    if (argc < 2)
+    switch (message) 
     {
-        printf("Usage: %s swf_file\n", argv[0]);
+    case WM_LBUTTONDOWN:
+        ::PostMessage(hWnd, WM_NCLBUTTONDOWN, HTCAPTION, lParam);
+        break;
+    case WM_KEYDOWN: 
+        break;
+    case WM_ERASEBKGND:
         return 0;
-    }
-
-    if (argc > 2) 
-        print_tag = true;
-
-    FILE* fi = fopen(argv[1], "rb");
-    if (NULL == fi)
-    {
-        printf("cannot open swf file [%s]!\n", argv[1]);
-        return -1;
-    }
-
-    fseek(fi, 0L, SEEK_END);
-    long int size = ftell(fi);
-    fseek(fi, 0L, SEEK_SET);
-
-    U8* inbuf = (U8*)malloc((size_t)size);
-    if (NULL == inbuf)
-    {
-        printf("Cannot allocate %d bytes memory!\n", size);
-        return -1;
-    }
-
-    size_t ret = fread(inbuf, size, 1, fi);
-    if (1 != ret)
-    {
-        printf("Cannot read %d bytes from SWF file!\n", size);
-        goto _exit_app;
-    }
-    fclose(fi);
-
-    InitTagTab();
-
-    U8* p = inbuf;
-    if ('F' != *(p+0) || 'W' != *(p+1) || 'S' != *(p+2) || 0x08 != *(p+3)) 
-    {
-        printf("SWF signature is wrong!\n");
-        goto _exit_app;
-    }
-
-    U32 bytes = *((U32*)(p + 4));
-    if (bytes != size)
-    {
-        printf("SWF file size is: %d - %d bytes\n", size, bytes);
-        goto _exit_app;
-    }
-
-    sp.Attach(inbuf, 8, size);
-
-    sp.GetRect(&rect);
-    printf("\n\n=== SWF frame size - xmin=%d, xmax=%d, ymin=%d, ymax=%d, pos=%d ===\n",
-        rect.xmin, rect.xmax, rect.ymin, rect.ymax, sp.GetPosition());
-
-    U16 frameRate = sp.Get2Bytes() >> 8;
-    U16 frameCount = sp.Get2Bytes();
-    printf("SWF Frame rate and count are %d : %d\n", frameRate, frameCount);
-
-    CMp3Decomp* decoder = new CMp3Decomp();
-    if (nullptr == decoder)
-    {
-        printf("Cannot Intialize MP3 decoder\n");
-        goto _exit_app;
-    }
-
-    U8* q;
-    U8 tagType;
-    U16 tagId;
-    U32 tagLen, offset;
-    U32 tagIdx = 0, sndIdx = 0;
-    S16 frameIdx = -1;
-    U8 format;
-    U16 sampleCount;
-    U16 latencySeek;
-    do 
-    {
-        tagId = sp.GetTag();
-        if (0 == tagTab[tagId]) /* we are sure that the camtasia video only use 13 tags */
-        { 
-            printf("[%6d : %6d]--Invalid tag: %d\n", tagIdx, frameIdx+1, tagId);
-            goto _exit_app;
-        }
-        // it is a valid tag, process it.
-        tagTab[tagId]++;
-        tagIdx++;
-        tagLen = sp.GetTagLen();
-        tagType = sp.GetTagType();
-        q = sp.GetCurrentAddr();
-        offset = sp.GetTagPosition();
-        // process the current tag
-        switch (tagId)
+    case WM_PAINT:
+        break;
+    case WM_DROPFILES:
+        if (DragQueryFile((HDROP)wParam, 0, path, MAX_PATH))
         {
-        case ST_SOUNDSTREAMBLOCK:
-            if (print_tag)
-            {
-                printf("(%c)[%5d : %5d]--ST_SOUNDSTREAMBLOCK[%6d : %9d] - %6d bytes\n",
-                    tagType, frameIdx + 1, sndIdx, tagIdx, offset, tagLen
-                );
-            }
-            sndIdx++;
-            DoSoundStreamBlock(q, tagLen, decoder);
-            break;
-        case ST_SHOWFRAME:
-            frameIdx++;
-            break;
-        case ST_SOUNDSTREAMHEAD2:
-            if (print_tag)
-            {
-                printf("(%c)[%5d ]---------ST_SOUNDSTREAMHEAD2[%6d : %9d] - %6d bytes\n",
-                    tagType, frameIdx + 1, tagIdx, offset, tagLen
-                );
-            }
-            if (sp.GetTagLen() < 6)
-            {
-                printf("Invalid ST_SOUNDSTREAMHEAD2\n");
-                goto _exit_app;
-            }
-            format = sp.GetByte();
-            sampleCount = sp.Get2Bytes();
-            latencySeek = sp.Get2Bytes();
-            sp.InitFormat(format, sampleCount, latencySeek);
-            if (0 != soundMix.OpenNativeDevice(format, &sp))
-            {
-                printf("Cannot open audio device!\n");
-                goto _exit_app;
-            }
-
-            break;
-        case ST_END:
-            goto _swf_summary;
-        default:
-            break;
+            MessageBox(NULL, path, TEXT("Drag File"), MB_OK);
         }
+        break;
+    case WM_CREATE:
+        DragAcceptFiles(hWnd, TRUE);
+        break;
+    case WM_CLOSE:
+        PostQuitMessage(0);
+        break;
+    }
+    return DefWindowProc(hWnd, message, wParam, lParam);
+}
 
-        sp.GotoNextTag();
+int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpstrCmdLine, int nCmdShow)
+{
+    ///////////////////////////////////////////////////////////
+    // Set up window
+    ///////////////////////////////////////////////////////////
 
-    } while (true);
+    const TCHAR WIN_CLASS_NAME[] = TEXT("XAUDIO2_SWF_WINDOW_CLASS");
 
-_swf_summary:
-    if (ST_END == tagId)
+    WNDCLASSEXW  wcex = { 0 };
+
+    wcex.cbSize = sizeof(WNDCLASSEX);
+
+    wcex.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+    wcex.lpfnWndProc = (WNDPROC)swfWndProc;
+    wcex.cbClsExtra = 0;
+    wcex.cbWndExtra = 0;
+    wcex.hInstance = hInstance;
+    wcex.hIcon = NULL;
+    wcex.hCursor = LoadCursor(hInstance, IDC_ARROW);
+    wcex.hbrBackground = NULL;
+    wcex.lpszMenuName = NULL;
+    wcex.lpszClassName = WIN_CLASS_NAME;
+    wcex.hIconSm = NULL;
+
+    ATOM r = RegisterClassEx(&wcex);
+    if (0 == r)
     {
-        printf("\n===== parser successfuly! [%6d : %6d : %6d (%4.2f%%)] ============\n",
-            frameIdx + 1, tagIdx, sndIdx,
-            (float)sndIdx * 100 / (float)tagIdx
-            );
-
-        printf("tagTab[ST_SHOWFRAME]           = %6d\n", tagTab[ST_SHOWFRAME] - 1);
-        printf("tagTab[ST_SOUNDSTREAMBLOCK]    = %6d\n", tagTab[ST_SOUNDSTREAMBLOCK] - 1);
-        printf("tagTab[ST_PLACEOBJECT2]        = %6d\n", tagTab[ST_PLACEOBJECT2] - 1);
-        printf("tagTab[ST_DEFINESHAPE3]        = %6d\n", tagTab[ST_DEFINESHAPE3] - 1);
-        printf("tagTab[ST_DEFINEBITSLOSSLESS2] = %6d\n", tagTab[ST_DEFINEBITSLOSSLESS2] - 1);
-        printf("tagTab[ST_REMOVEOBJECT2]       = %6d\n", tagTab[ST_REMOVEOBJECT2] - 1);
-        printf("------------------------------------------------------------------\n");
-        printf("tagTab[ST_DOACTION]            = %6d\n", tagTab[ST_DOACTION] - 1);
-        printf("tagTab[ST_FRAMELABEL]          = %6d\n", tagTab[ST_FRAMELABEL] - 1);
-        printf("tagTab[ST_CAMTASIA]            = %6d\n", tagTab[ST_CAMTASIA] - 1);
-        printf("tagTab[ST_FILEATTRIBUTES]      = %6d\n", tagTab[ST_FILEATTRIBUTES] - 1);
-        printf("tagTab[ST_METADATA]            = %6d\n", tagTab[ST_METADATA] - 1);
-        printf("tagTab[ST_SOUNDSTREAMHEAD2]    = %6d\n", tagTab[ST_SOUNDSTREAMHEAD2] - 1);
-        printf("tagTab[ST_END]                 = %6d\n", tagTab[ST_END] - 1);
-
-        if (tagTab[ST_DEFINESHAPE3] == tagTab[ST_PLACEOBJECT2])
-        {
-            printf("EQUAL!!!!!!!!ST_PLACEOBJECT2 ==  ST_DEFINESHAPE3!!!!!!!!\n");
-        }
-        if (tagTab[ST_SHOWFRAME] == tagTab[ST_SOUNDSTREAMBLOCK])
-        {
-            printf("EQUAL!!!!!!!!ST_SHOWFRAME == ST_SOUNDSTREAMBLOCK !!!!!!!!\n");
-        }
+        MessageBox(NULL, TEXT("Failed to register window class!"), TEXT("FAILURE"), MB_OK);
+        return 1;
     }
 
-_exit_app:
-    if (NULL != inbuf) free(inbuf);
-    return 0;
+    HWND window = CreateWindow(
+        WIN_CLASS_NAME,
+        TEXT("SWF MP3 demo"),
+        WS_OVERLAPPEDWINDOW,
+        100,
+        100,
+        400,
+        400,
+        NULL,
+        NULL,
+        hInstance,
+        NULL
+    );
+
+    if (!window) 
+    {
+        MessageBox(NULL, TEXT("Failed to create window!"), TEXT("FAILURE"), MB_OK);
+        return 1;
+    }
+
+    ///////////////////////////////////////////////////////////
+    // Initialize COM
+    ///////////////////////////////////////////////////////////
+    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (S_OK != hr) 
+    {
+        MessageBox(NULL, TEXT("Failed to create COM!"), TEXT("FAILURE"), MB_OK);
+        return 1;
+    }
+
+    ///////////////////////////////////////////////////////////
+    // Show window and start message loop.
+    ///////////////////////////////////////////////////////////
+    ShowWindow(window, SW_SHOW);
+
+    MSG message;
+    while (GetMessage(&message, NULL, 0, 0) > 0) 
+    {
+        TranslateMessage(&message);
+        DispatchMessage(&message);
+    }
+
+    ::CoUninitialize();
+    return (int)message.wParam;
 }
 
 int DoSoundStreamHead2(U8* tag, U32 bytes)
