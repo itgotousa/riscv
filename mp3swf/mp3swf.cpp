@@ -552,6 +552,9 @@ public:
         m_frameRate = Get2Bytes() >> 8;
         m_frameCount = Get2Bytes();
 
+        m_AtEnd = false;
+        m_frameCurrent = -1;
+
         return 0;
     }
 
@@ -823,11 +826,13 @@ IDWriteTextFormat* gpTextFormat = nullptr;
 
 ID2D1HwndRenderTarget* gpRenderTarget = nullptr;
 ID2D1SolidColorBrush* gpBrush = nullptr;
+HCURSOR gcursor;
 
 TCHAR path[MAX_PATH + 1] = { 0 };
 TCHAR text[MAX_PATH + 1] = { 0 };
 
 #define  DEFAULT_DPI    96
+
 LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     int r;
@@ -843,14 +848,14 @@ LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
         {
             if (player.HasData())
             {
-                frameIdx = player.GetFrameCurrent();
+                frameIdx = player.GetFrameCurrent()+1;
                 U16 frameCount = player.GetFrameCount();
                 U16 frameRate = player.GetFrameRate();
                 swprintf(text, MAX_PATH, TEXT("Curr:%5d | Total:%5d | Rate:%d"), frameIdx, frameCount, frameRate);
                 rcClient.left = 10;
                 rcClient.right = 300;
                 rcClient.top = 50;
-                rcClient.bottom = 100;
+                rcClient.bottom = 150;
                 InvalidateRect(hWnd, &rcClient, 1);
             }
         }
@@ -874,7 +879,6 @@ LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
     case WM_ERASEBKGND:
         return 0;
     case WM_PAINT:
-#if 10
         if (nullptr == gpRenderTarget)
         {
             GetClientRect(hWnd, &rcClient);
@@ -910,8 +914,10 @@ LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
         gpRenderTarget->SetTransform(D2D1::Matrix3x2F::Identity());
 
         // Draw text
-        D2D1_RECT_F layoutRect = D2D1::RectF(10.0f, 50.0f, 300.0f, 100.0f);
-        gpRenderTarget->DrawText(text, wcslen(text), gpTextFormat, layoutRect, gpBrush);
+        D2D1_RECT_F layoutRect0 = D2D1::RectF(10.0f, 50.0f, 300.0f, 100.0f);
+        gpRenderTarget->DrawText(text, wcslen(text), gpTextFormat, layoutRect0, gpBrush);
+        D2D1_RECT_F layoutRect1 = D2D1::RectF(10.0f, 100.0f, 300.0f, 150.0f);
+        gpRenderTarget->DrawText(path, wcslen(path), gpTextFormat, layoutRect1, gpBrush);
 
         hr = gpRenderTarget->EndDraw();
         if (FAILED(hr) || hr == D2DERR_RECREATE_TARGET)
@@ -924,9 +930,10 @@ LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
                 gpBrush = nullptr;
             }
         }
-#endif
         break;
-
+    case WM_SETCURSOR:
+        //SetCursor(gcursor);
+        break;
     case WM_DROPFILES:
         if (0 == DragQueryFile((HDROP)wParam, 0, path, MAX_PATH))
         {
@@ -943,9 +950,10 @@ LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
             break;
 
         uElapse = 1000 / player.m_frameRate;
+        KillTimer(hWnd, SWF_TIMER);
         SetTimer(hWnd, SWF_TIMER, uElapse, NULL);
-
         break;
+
     case WM_CREATE:
         swprintf(text, MAX_PATH, TEXT("Drag SWF file here!"));
         DragAcceptFiles(hWnd, TRUE);
@@ -957,6 +965,7 @@ LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
     }
     return DefWindowProc(hWnd, message, wParam, lParam);
 }
+
 
 int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpstrCmdLine, int nCmdShow)
 {
@@ -1061,6 +1070,7 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpstrC
     ///////////////////////////////////////////////////////////
     // Show window and start message loop.
     ///////////////////////////////////////////////////////////
+    SetCursor(LoadCursor(hInstance, IDC_ARROW));
     SetTimer(window, SWF_SECOND, 1000, NULL);
     ShowWindow(window, SW_SHOW);
 
@@ -1071,6 +1081,11 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpstrC
         DispatchMessage(&message);
     }
 
+    if (nullptr != streamSWF)
+    {
+        free(streamSWF);
+        streamSWF = nullptr;
+    }
     KillTimer(window, SWF_SECOND);
     ::CoUninitialize();
     return (int)message.wParam;
