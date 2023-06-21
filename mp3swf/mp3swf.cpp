@@ -833,6 +833,9 @@ TCHAR text[MAX_PATH + 1] = { 0 };
 
 #define  DEFAULT_DPI    96
 
+DWORD tidTimer;
+DWORD tidPaint;
+
 LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     int r;
@@ -858,6 +861,7 @@ LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
                 rcClient.bottom = 150;
                 InvalidateRect(hWnd, &rcClient, 1);
             }
+            tidTimer = GetCurrentThreadId();
         }
         else if (SWF_TIMER == wParam)
         {
@@ -879,6 +883,7 @@ LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
     case WM_ERASEBKGND:
         return 0;
     case WM_PAINT:
+        tidPaint = GetCurrentThreadId();
         if (nullptr == gpRenderTarget)
         {
             GetClientRect(hWnd, &rcClient);
@@ -917,6 +922,8 @@ LRESULT CALLBACK swfWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
         D2D1_RECT_F layoutRect0 = D2D1::RectF(10.0f, 50.0f, 300.0f, 100.0f);
         gpRenderTarget->DrawText(text, wcslen(text), gpTextFormat, layoutRect0, gpBrush);
         D2D1_RECT_F layoutRect1 = D2D1::RectF(10.0f, 100.0f, 300.0f, 150.0f);
+
+        swprintf(path, MAX_PATH, TEXT("Timer TID:%6d | Paint TID:%6d"), tidTimer, tidPaint);
         gpRenderTarget->DrawText(path, wcslen(path), gpTextFormat, layoutRect1, gpBrush);
 
         hr = gpRenderTarget->EndDraw();
