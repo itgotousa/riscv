@@ -26,6 +26,9 @@ BWF文件的开始个字节的含义如下：
 - ST_REMOVEOBJECT2
 - ST_SHOWFRAME
 - ST_END
+
+
+
 其中除了ST_FILEATTRIBUTES以外的Tag和SWF含义相同，具体请参考SWF文件格式规范。
 
 ### ST_FILEATTRIBUTES 
